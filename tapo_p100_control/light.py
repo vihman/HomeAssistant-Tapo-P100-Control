@@ -1,5 +1,8 @@
 """Tapo L510 Bulb Home Assistant Integration"""
+import ast
 import logging
+import requests
+import time
 
 from PyP100 import PyP100
 import voluptuous as vol
@@ -50,15 +53,16 @@ def setup_platform(hass, config, add_entities, discovery_info=None):
     password = config.get(CONF_PASSWORD)
 
     # Setup connection with devices/cloud
-    p100 = PyP100.P100(ipAddress, email, password)
+    p100 = TapoBase(ipAddress, email, password)
 
     try:
-    	p100.handshake()
-    	p100.login()
+        p100.handshake()
+        p100.login()
     except:
-    	_LOGGER.error("Could not connect to bulb. Possibly invalid credentials")
+        _LOGGER.error("Could not connect to bulb. Possibly invalid credentials")
 
     add_entities([L510Bulb(p100)])
+
 
 class L510Bulb(LightEntity):
     """Representation of a L510/L530 bulb"""
@@ -153,11 +157,13 @@ class L510Bulb(LightEntity):
             _LOGGER.debug("Setting color temp: %s K", temp_in_k)
             self._p100.setColorTemp(temp_in_k)
 
-    def set_hs_color(self, hs_color):
+    def set_hs_color(self, hs_color, brightness):
         """Set bulb's color"""
+        if not brightness:
+            brightness = self._brightness
         if hs_color and self.supported_features & SUPPORT_COLOR:
-            _LOGGER.debug("Setting hue sat color: %s", hs_color)
-            self._p100.setColor(hs_color[0], hs_color[1])
+            _LOGGER.debug("Setting hue sat color: '%s' brightness: '%s'", hs_color, brightness)
+            self._p100.setColor(hs_color[0], hs_color[1], brightness)
 
     def turn_on(self, **kwargs) -> None:
         """Turn bulb on"""
@@ -175,9 +181,10 @@ class L510Bulb(LightEntity):
                 # values checked for none in methods
                 self.set_brightness(brightness)
                 self.set_color_temp(color_temp)
-                self.set_hs_color(hs_color)
-            except:
-                _LOGGER.error("Unable to set bulb properties")
+                self.set_hs_color(hs_color, brightness)
+            except Exception as e:
+                _LOGGER.error("Unable to set bulb properties: %s" % e)
+                raise(e)
         else:
             _LOGGER.debug("Turning bulb on")
             self._p100.turnOn()
@@ -209,6 +216,7 @@ class L510Bulb(LightEntity):
         self._is_on = data["result"]["device_on"]
         self._unique_id = data["result"]["device_id"]
         self._brightness = data["result"]["brightness"]
+        self._model = data["result"]["model"]
         try:
             self._color_temp = data["result"]["color_temp"]
             if self._color_temp == 0:
@@ -219,3 +227,72 @@ class L510Bulb(LightEntity):
             self._hs_color = ( data["result"]["hue"], data["result"]["saturation"] )
         except KeyError:
             self._hs_color = None
+
+
+class TapoBase(PyP100.P100):
+
+    def setColorTemp(self, color_temp):
+        URL = f"http://{self.ipAddress}/app?token={self.token}"
+        Payload = {
+            "method": "set_device_info",
+            "params":{
+                "color_temp": color_temp,
+            },
+            "requestTimeMils": int(round(time.time() * 1000)),
+        }
+
+        headers = {
+            "Cookie": self.cookie
+        }
+
+        EncryptedPayload = self.tpLinkCipher.encrypt(json.dumps(Payload))
+
+        SecurePassthroughPayload = {
+            "method": "securePassthrough",
+            "params":{
+                "request": EncryptedPayload
+            }
+        }
+
+        r = requests.post(URL, json=SecurePassthroughPayload, headers=headers)
+
+        decryptedResponse = self.tpLinkCipher.decrypt(r.json()["result"]["response"])
+
+        if ast.literal_eval(decryptedResponse)["error_code"] != 0:
+            errorCode = ast.literal_eval(decryptedResponse)["error_code"]
+            errorMessage = self.errorCodes[str(errorCode)]
+            raise Exception(f"Error Code: {errorCode}, {errorMessage}")
+
+    def setColor(self, hue, saturation, brightness):
+        URL = f"http://{self.ipAddress}/app?token={self.token}"
+        Payload = {
+            "method": "set_device_info",
+            "params":{
+                "hue": hue,
+                "saturation": saturation,
+                "brightness": brightness
+            },
+            "requestTimeMils": int(round(time.time() * 1000)),
+        }
+
+        headers = {
+            "Cookie": self.cookie
+        }
+
+        EncryptedPayload = self.tpLinkCipher.encrypt(json.dumps(Payload))
+
+        SecurePassthroughPayload = {
+            "method": "securePassthrough",
+            "params":{
+                "request": EncryptedPayload
+            }
+        }
+
+        r = requests.post(URL, json=SecurePassthroughPayload, headers=headers)
+
+        decryptedResponse = self.tpLinkCipher.decrypt(r.json()["result"]["response"])
+
+        if ast.literal_eval(decryptedResponse)["error_code"] != 0:
+            errorCode = ast.literal_eval(decryptedResponse)["error_code"]
+            errorMessage = self.errorCodes[str(errorCode)]
+            raise Exception(f"Error Code: {errorCode}, {errorMessage}")
